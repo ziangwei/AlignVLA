@@ -1,0 +1,20 @@
+# Data
+data/nuscenes/
+data/drivelm/
+*.pkl
+*.pth
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Outputs
+outputs/
+logs/
+wandb/
+
+# Environment
+.env
+*.swp
