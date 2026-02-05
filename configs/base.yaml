@@ -1,0 +1,168 @@
+# =============================================================================
+# AlignVLA 基础配置文件
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 路径配置
+# -----------------------------------------------------------------------------
+paths:
+  # 项目根目录（SLURM脚本中会设置为绝对路径）
+  project_root: "/dss/dssfs05/pn39qo/pn39qo-dss-0001/di97fer/projects_for_test/AlignVLA"
+  
+  # 数据路径
+  drivelm_raw: "${paths.project_root}/data/drivelm/raw/v1_1_train_nus.json"
+  drivelm_processed: "${paths.project_root}/data/drivelm/processed"
+  nuscenes_root: "${paths.project_root}/data/nuscenes"
+  merged_data: "${paths.project_root}/data/merged"
+  
+  # 模型路径
+  base_model: "Qwen/Qwen3-VL-8B-Instruct"  # 会自动从HuggingFace下载
+  model_cache: "${paths.project_root}/models/cache"
+  sft_output: "${paths.project_root}/models/sft"
+  dpo_output: "${paths.project_root}/models/dpo"
+  
+  # 输出路径
+  outputs: "${paths.project_root}/outputs"
+  logs: "${paths.project_root}/logs"
+
+# -----------------------------------------------------------------------------
+# 数据处理配置
+# -----------------------------------------------------------------------------
+data:
+  # 相机列表（固定顺序）
+  cameras:
+    - "CAM_FRONT"
+    - "CAM_FRONT_LEFT"
+    - "CAM_FRONT_RIGHT"
+    - "CAM_BACK"
+    - "CAM_BACK_LEFT"
+    - "CAM_BACK_RIGHT"
+  
+  # 轨迹配置
+  trajectory:
+    num_waypoints: 6          # 未来waypoint数量（用于模型输出，3秒）
+    num_waypoints_label: 12   # 用于行为标签推断（6秒）
+    time_interval: 0.5        # 每个waypoint间隔（秒）
+    
+    # 离散化配置（扩大范围以覆盖高速场景）
+    # X: 0-50m, 精度0.5m → 101个token (X0-X100)
+    # Y: -10到+10m, 精度0.5m → 41个token (Y0-Y40, Y20=0)
+    x_range: [0, 50]          # 米，覆盖3秒@60km/h=50m
+    y_range: [-10, 10]        # 米，覆盖多车道换道
+    resolution: 0.5           # 米/token
+  
+  # 行为推断阈值
+  behavior:
+    heading_threshold: 20     # 度，大于此值判定为转弯
+    lane_change_threshold: 1.5  # 米，Y偏移大于此值判定为换道
+  
+  # 数据集大小
+  drivelm_samples: 4000       # DriveLM约4K样本
+  nuscenes_extra: 6000        # 额外生成的nuScenes样本
+  total_target: 10000         # 目标总样本数
+
+# -----------------------------------------------------------------------------
+# 模型配置
+# -----------------------------------------------------------------------------
+model:
+  name: "Qwen/Qwen3-VL-8B-Instruct"
+  dtype: "bfloat16"
+  
+  # 图像处理
+  # Qwen3-VL压缩率32，所以 pixels = tokens × 32 × 32
+  image_min_pixels: 262144    # 256 tokens × 32 × 32
+  image_max_pixels: 1310720   # 1280 tokens × 32 × 32
+  
+  # 序列长度
+  max_seq_length: 4096        # 6张图 + 文本 + 轨迹
+  
+  # 特殊token数量
+  num_trajectory_tokens: 142  # 101(X) + 41(Y) = 142
+
+# -----------------------------------------------------------------------------
+# LoRA配置
+# -----------------------------------------------------------------------------
+lora:
+  r: 64                       # rank，8B模型用64够了
+  lora_alpha: 128             # 通常2×r
+  lora_dropout: 0.05
+  
+  # 目标模块：只训练LLM的attention和MLP
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  
+  # 冻结vision tower节省显存
+  freeze_vision_tower: true
+  
+  # 训练embedding层（因为添加了新token）
+  modules_to_save:
+    - "embed_tokens"
+    - "lm_head"
+
+# -----------------------------------------------------------------------------
+# SFT训练配置
+# -----------------------------------------------------------------------------
+sft:
+  # 训练超参数
+  num_epochs: 3
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 8  # 有效batch = 1×2×8 = 16
+  learning_rate: 2.0e-4           # LoRA通常用较高学习率
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  
+  # 优化器
+  optim: "adamw_torch"
+  lr_scheduler: "cosine"
+  
+  # 保存策略
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 3
+  
+  # 日志
+  logging_steps: 10
+  report_to: "tensorboard"
+
+# -----------------------------------------------------------------------------
+# DPO配置
+# -----------------------------------------------------------------------------
+dpo:
+  # 采样配置
+  num_samples_per_input: 5    # 每个输入采样5条轨迹
+  temperature: 0.8
+  top_p: 0.9
+  
+  # Preference阈值
+  good_ade_threshold: 2.0     # ADE < 2m 认为是好轨迹
+  bad_ade_threshold: 3.0      # ADE > 3m 用GT替换chosen
+  
+  # 训练超参数
+  beta: 0.1                   # DPO的beta参数
+  num_epochs: 1
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5       # DPO用较低学习率
+  
+  # 目标preference pairs数量
+  target_pairs: 15000
+
+# -----------------------------------------------------------------------------
+# 评估配置
+# -----------------------------------------------------------------------------
+evaluation:
+  metrics:
+    - "ade"                   # Average Displacement Error
+    - "fde"                   # Final Displacement Error
+  
+  # 可视化
+  visualization:
+    num_samples: 50           # 可视化样本数
+    save_video: true
