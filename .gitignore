@@ -18,3 +18,4 @@ wandb/
 # Environment
 .env
 *.swp
+.vscode/
